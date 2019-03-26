@@ -25,7 +25,7 @@ void throw(const char *issuer, const char *message);
 
 void log_i(const char *issuer, const char *message, ...);
 
-void print_help();
+void print_help(void);
 
 
 #endif //PEEP2PEEP_PEEP_LOG_H

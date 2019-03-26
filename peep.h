@@ -21,8 +21,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <zconf.h>
 #include <time.h>
+#include <sys/time.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <pthread/pthread.h>
 

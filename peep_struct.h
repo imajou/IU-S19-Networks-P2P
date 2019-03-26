@@ -6,7 +6,7 @@
 #define PEEP2PEEP_P2P_STRUCTS_H
 
 typedef struct {
-    char * address;
+    char *address;
     unsigned int port;
 } s_connect_args;
 

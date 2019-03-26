@@ -12,8 +12,8 @@
  * receives count of words from the client, and receives words one by one.
  * Writes the data to receive.txt
  *
- * @param mater_sock Master socket file descriptor
- * @return
+ * @param vargp Master socket file descriptor
+ * @return nothing
  */
 void *srv_accept_client(void *vargp) {
 
@@ -85,9 +85,8 @@ void *srv_accept_client(void *vargp) {
  * Message contains initial packet of number of words within a file
  * Then, sequentially sent packages for every word
  *
- * @param address Address of the server to send request to
- * @param port Server port
- * @return
+ * @param vargp Struct with server address and port
+ * @return nothing
  */
 void *cli_send_message(void *vargp) {
 
@@ -161,8 +160,8 @@ void *cli_send_message(void *vargp) {
  * Listen for incoming connections and create a new thread for each new
  * Number of connections is limited to 5
  *
- * @param vargp
- * @return
+ * @param vargp nothing
+ * @return nothing
  */
 void *srv_init(void *vargp) {
     int master_sock_tcp_fd = 0;
@@ -285,16 +284,15 @@ void command_parse(char *input) {
 /**
  * Shell to enter commands
  * @param command Command to be executed on init, may be NULL
- * @return
  */
-int init_glebash(char *command) {
+void init_glebash(char *command) {
     if (command != NULL) command_parse(command);
     print_help();
     while (1) {
         printf(ANSI_COLOR_YELLOW "glebash-0.3$ " ANSI_COLOR_RESET);
         char input[64] = "";
         fgets(input, 64, stdin);
-        if (!strcmp(input, "exit\n")) return 0;
+        if (!strcmp(input, "exit\n")) return;
         command_parse(input);
     }
 }

@@ -10,9 +10,14 @@
 #define ANSI_COLOR_GRAY "\x1b[90m"
 #define ANSI_COLOR_RESET "\x1b[0m"
 
-#define LOG_NAME_SERVER "SERVER"
-#define LOG_NAME_CLIENT "CLIENT"
-#define LOG_NAME_SHELL "SHELL"
+#define LOG_SERVER "SERVER"
+#define LOG_SHELL "SHELL"
+#define LOG_SYNC_SEND "SYNC_REQ"
+#define LOG_SYNC_RECV "SYNC_RECV"
+#define LOG_FILE_SEND "FILE_REQ"
+#define LOG_FILE_RECV "FILE_RECV"
+
+
 
 #include <errno.h>
 #include <stdio.h>

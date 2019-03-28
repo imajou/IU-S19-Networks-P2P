@@ -1,9 +1,138 @@
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 #include "peep.h"
 #include "peep_log.h"
 #include "peep_util.h"
 #include "peep_struct.h"
 
-#define SERVER_PORT 54777
+s_peer_info *peer_info;
+struct ifaddrs *interfaces;
+
+
+void *request_file(void *vargp) {
+
+    s_file_request_args *request_info = (s_file_request_args *) vargp;
+
+    int sock_fd = 0;
+    ssize_t sent_bytes = 0;
+    int addr_len = 0;
+
+    struct sockaddr_in req_addr;
+    struct hostent *host = gethostbyname(request_info->ip);
+
+    req_addr.sin_family = AF_INET;
+    req_addr.sin_port = htons(request_info->port);
+    req_addr.sin_addr = *((struct in_addr *) host->h_addr);
+
+    sock_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    connect(sock_fd, (struct sockaddr *) &req_addr, sizeof(struct sockaddr));
+
+
+    char buffer[1024];                      // Buffer for raw data
+    memset(buffer, 0, sizeof(buffer));
+    char file_data[1024];                   // Structured client data
+    memset(file_data, 0, sizeof(file_data));
+
+    const int request_code = 0;
+    sent_bytes = sendto(sock_fd, &request_code, sizeof(request_code), 0,
+                            (struct sockaddr *) &req_addr, sizeof(struct sockaddr));
+    sleep(1);
+    sent_bytes = sendto(sock_fd, request_info->filename, sizeof(request_info->filename), 0,
+                        (struct sockaddr *) &req_addr, sizeof(struct sockaddr));
+    sleep(1);
+
+    recvfrom(sock_fd, (char *) buffer, sizeof(buffer), 0,
+             (struct sockaddr *) &req_addr, &addr_len);
+    int cli_word_count = *((int *) buffer);
+    log_i(LOG_FILE_RECV, "Word count received: %i", cli_word_count);
+
+    memset(buffer, 0, sizeof(buffer));
+    memset(file_data, 0, sizeof(file_data));
+
+    // Accept further connections for every word
+    for (int word = 0; word < cli_word_count; ++word) {
+        // Receive next word
+        recvfrom(sock_fd, (char *) buffer, sizeof(buffer), 0,
+                 (struct sockaddr *) &req_addr, &addr_len);
+        log_i(LOG_FILE_RECV, "Received word: %s", buffer);
+        // Store data
+        strcat(file_data, buffer);
+        strcat(file_data, " ");
+        memset(buffer, 0, sizeof(buffer));
+    }
+
+    log_i(LOG_FILE_RECV, "Filename: %s", request_info->filename);
+    // Write received data to a file
+    FILE *recv_file = fopen(request_info->filename, "w");
+    fprintf(recv_file, "%s", file_data);
+    fclose(recv_file);
+
+    pthread_exit(NULL);
+}
+
+void *request_sync(void *vargp) {
+    s_file_request_args *server_info = (s_file_request_args *) vargp;
+
+    int sock_fd = 0;
+    ssize_t cli_sent_bytes = 0;
+
+    struct sockaddr_in srv_addr;
+    struct hostent *host = gethostbyname(server_info->ip);
+
+    srv_addr.sin_family = AF_INET;
+    srv_addr.sin_port = htons(server_info->port);
+    srv_addr.sin_addr = *((struct in_addr *) host->h_addr);
+
+    sock_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    connect(sock_fd, (struct sockaddr *) &srv_addr, sizeof(struct sockaddr));
+
+
+    const int request_code = 1;
+    cli_sent_bytes = sendto(sock_fd, &request_code, sizeof(request_code), 0,
+                            (struct sockaddr *) &srv_addr, sizeof(struct sockaddr));
+    if (cli_sent_bytes == 0) {
+        close(sock_fd);
+        log_i(LOG_SYNC_SEND, "Failed to connect to %s", server_info->ip);
+        pthread_exit(NULL);
+    }
+    log_i(LOG_SYNC_SEND, "Request for sync sent, of total bytes %d to server %s", cli_sent_bytes,
+          server_info->ip);
+
+
+    cli_sent_bytes = sendto(sock_fd, &peer_info->_short_info, sizeof(peer_info->_short_info), 0,
+                            (struct sockaddr *) &srv_addr, sizeof(struct sockaddr));
+    if (cli_sent_bytes == 0) {
+        close(sock_fd);
+        log_i(LOG_SYNC_SEND, "Failed to connect to %s", server_info->ip);
+        pthread_exit(NULL);
+    }
+    log_i(LOG_SYNC_SEND, "Peer info sent, of total bytes %d to server %s", cli_sent_bytes, server_info->ip);
+
+
+    int number_of_peers = 0;
+    cli_sent_bytes = sendto(sock_fd, &number_of_peers, sizeof(number_of_peers), 0,
+                            (struct sockaddr *) &srv_addr, sizeof(struct sockaddr));
+    if (cli_sent_bytes == 0) {
+        close(sock_fd);
+        log_i(LOG_SYNC_SEND, "Failed to connect to %s", server_info->ip);
+        pthread_exit(NULL);
+    }
+    log_i(LOG_SYNC_SEND, "Number of peers sent, of total bytes %d to server %s", cli_sent_bytes,
+          server_info->ip);
+
+
+    while (1) {
+        cli_sent_bytes = sendto(sock_fd, &peer_info->_full_info, sizeof(peer_info->_full_info), 0,
+                                (struct sockaddr *) &srv_addr, sizeof(struct sockaddr));
+        if (cli_sent_bytes == 0) {
+            close(sock_fd);
+            log_i(LOG_SYNC_SEND, "Failed to connect to %s", server_info->ip);
+            pthread_exit(NULL);
+        }
+        sleep(3);
+    }
+}
 
 /**
  * Thread to connect client with master socket passed
@@ -15,15 +144,15 @@
  * @param vargp Master socket file descriptor
  * @return nothing
  */
-void *srv_accept_client(void *vargp) {
+void *receive(void *vargp) {
 
     int *master_sock = (int *) vargp;   // Master socket
 
     int cli_sock = 0;                   // Client socket
 
-    struct sockaddr_in cli_addr;        // Client address
-    socklen_t addr_len = 0;             // Client address length
-    ssize_t srv_recv_bytes = 0;         // Bytes received counter
+    struct sockaddr_in cli_addr;        // Client ip
+    socklen_t addr_len = 0;             // Client ip length
+    ssize_t recv_bytes = 0, sent_bytes = 0;         // Bytes received counter
 
     char buffer[1024];                  // Buffer for raw data
     memset(buffer, 0, sizeof(buffer));
@@ -34,124 +163,105 @@ void *srv_accept_client(void *vargp) {
     cli_sock =
             accept(*master_sock, (struct sockaddr *) &cli_addr, &addr_len);
     if (cli_sock < 0) {
-        throw(LOG_NAME_CLIENT, "Accept error");
+        throw(LOG_SERVER, "Accept error");
     }
 
-    log_i(LOG_NAME_SERVER, "Connection accepted from client : %s:%u",
+    log_i(LOG_SERVER, "Connection accepted from client : %s:%u",
           inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
 
-    // Receive word count from client
-    srv_recv_bytes = recvfrom(cli_sock, (char *) buffer, sizeof(buffer), 0,
+    // Receive request code from client
+    recv_bytes = recvfrom(cli_sock, (char *) buffer, sizeof(buffer), 0,
                               (struct sockaddr *) &cli_addr, &addr_len);
-    log_i(LOG_NAME_SERVER, "Received %d bytes from client %s:%u.",
-          srv_recv_bytes, inet_ntoa(cli_addr.sin_addr),
+    log_i(LOG_SERVER, "Received %d bytes from client %s:%u.",
+          recv_bytes, inet_ntoa(cli_addr.sin_addr),
           ntohs(cli_addr.sin_port));
 
-    if (srv_recv_bytes == 0) {
+    if (recv_bytes == 0) {
         close(cli_sock);
         pthread_exit(NULL);
     }
 
-    // Init word count for further iteration
-    int cli_word_count = *((int *) buffer);
-    log_i(LOG_NAME_SERVER, "Word count received: %i", cli_word_count);
+    int request_code = *((int *) buffer);
 
-    memset(buffer, 0, sizeof(buffer));
-    memset(cli_data, 0, sizeof(cli_data));
-
-    // Accept further connections for every word
-    for (int word = 0; word < cli_word_count; ++word) {
-        // Receive next word
-        recvfrom(cli_sock, (char *) buffer, sizeof(buffer), 0,
-                 (struct sockaddr *) &cli_addr, &addr_len);
-        log_i(LOG_NAME_SERVER, "Received word: %s", buffer);
-        // Store data
-        strcat(cli_data, buffer);
-        strcat(cli_data, " ");
-        memset(buffer, 0, sizeof(buffer));
+    log_i(LOG_SERVER, "Request code received: %i", request_code);
+    if (request_code == 1) {
+        // Save received peer info
+        // Keep-alive connection
     }
 
-    // Write received data to a file
-    FILE *recv_file = fopen("receive.txt", "w");
-    fprintf(recv_file, "%s", cli_data);
-    fclose(recv_file);
+    if (request_code == 0) {
+        // Receive filename
+        recv_bytes = recvfrom(cli_sock, (char *) buffer, sizeof(buffer), 0,
+                                  (struct sockaddr *) &cli_addr, &addr_len);
+        log_i(LOG_FILE_SEND, "Filename received: received %d bytes from client %s:%u.",
+              recv_bytes, inet_ntoa(cli_addr.sin_addr),
+              ntohs(cli_addr.sin_port));
+        char *filename = malloc(sizeof(char) * strlen(buffer) + 16);
+        strcpy(filename, buffer);
+        // Send word count
+        // Send words one by one
+
+        log_i(LOG_FILE_SEND, "Accessing file %s", filename);
+
+        if (access(filename, F_OK)) {
+            log_i(LOG_FILE_SEND, "File %s does not exist", filename);
+            pthread_exit(NULL);
+        }
+        if (access(filename, R_OK)) {
+            log_i(LOG_FILE_SEND, "File %s has no access for read", filename);
+            pthread_exit(NULL);
+        }
+
+
+        FILE *src_file = fopen(filename, "rb");
+        fseek(src_file, 0l, SEEK_END);
+        long src_file_size = ftell(src_file);
+        fseek(src_file, 0l, SEEK_SET);
+
+        char *src_file_data = malloc((size_t) (src_file_size + 1));
+        fread(src_file_data, (size_t) src_file_size, 1, src_file);
+        fclose(src_file);
+
+        src_file_data[src_file_size] = 0;
+
+        int src_file_word_count = count_words(src_file_data);
+
+        log_i("asdasd", "Nice init");
+
+        sent_bytes = sendto(cli_sock, &src_file_word_count, sizeof(src_file_word_count), 0,
+                                (struct sockaddr *) &cli_addr, sizeof(struct sockaddr));
+
+        log_i(LOG_FILE_SEND, "Word count sent = %d, of total bytes %d to server %s",
+              src_file_word_count, sent_bytes, inet_ntoa(cli_addr.sin_addr));
+
+        if (sent_bytes == 0) {
+            close(cli_sock);
+            pthread_exit(NULL);
+        }
+
+        char word_buff[64];
+        memset(word_buff, 0, sizeof(word_buff));
+        int word_index = 0, char_index = 0;
+        while (1) {
+            if (src_file_data[char_index] == ' ' || src_file_data[char_index] == '\0') {
+                log_i(LOG_FILE_SEND, "Sending word_buff: %s", word_buff);
+                sleep(1);
+                sendto(cli_sock, &word_buff, sizeof(word_buff), 0,
+                       (struct sockaddr *) &cli_addr, sizeof(struct sockaddr));
+                word_index = 0;
+                if (src_file_data[char_index] == '\0') break;
+                char_index++;
+                memset(word_buff, 0, sizeof(word_buff));
+                continue;
+            }
+            word_buff[word_index++] = src_file_data[char_index++];
+        }
+
+        pthread_exit(NULL);
+
+    }
 
     return NULL;
-}
-
-
-/**
- * Send message to the server
- * Message contains initial packet of number of words within a file
- * Then, sequentially sent packages for every word
- *
- * @param vargp Struct with server address and port
- * @return nothing
- */
-void *cli_send_message(void *vargp) {
-
-    s_connect_args *server_info = (s_connect_args *) vargp;
-
-    int sock_fd = 0;
-    ssize_t cli_sent_bytes = 0;
-
-    struct sockaddr_in srv_addr;
-    struct hostent *host = gethostbyname(server_info->address);
-
-    srv_addr.sin_family = AF_INET;
-    srv_addr.sin_port = htons(server_info->port);
-    srv_addr.sin_addr = *((struct in_addr *) host->h_addr);
-
-    sock_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    connect(sock_fd, (struct sockaddr *) &srv_addr, sizeof(struct sockaddr));
-
-    if (access("source.txt", F_OK)) throw(LOG_NAME_CLIENT, "File source.txt does not exist");
-    if (access("source.txt", R_OK)) throw(LOG_NAME_CLIENT, "File source.txt has no access for read");
-    FILE *src_file = fopen("source.txt", "rb");
-    fseek(src_file, 0l, SEEK_END);
-    long src_file_size = ftell(src_file);
-    fseek(src_file, 0l, SEEK_SET);
-
-    char *src_file_data = malloc((size_t) (src_file_size + 1));
-    fread(src_file_data, (size_t) src_file_size, 1, src_file);
-    fclose(src_file);
-
-    src_file_data[src_file_size] = 0;
-
-    int src_file_word_count = count_words(src_file_data);
-
-    cli_sent_bytes = sendto(sock_fd, &src_file_word_count, sizeof(src_file_word_count), 0,
-                            (struct sockaddr *) &srv_addr, sizeof(struct sockaddr));
-
-    log_i(LOG_NAME_CLIENT, "Word count sent = %d, of total bytes %d to server %s",
-          src_file_word_count, cli_sent_bytes, server_info->address);
-
-    if (cli_sent_bytes == 0) {
-        close(sock_fd);
-        pthread_exit(NULL);
-    }
-
-    char word_buff[64];
-    memset(word_buff, 0, sizeof(word_buff));
-    int word_index = 0, char_index = 0;
-    while (1) {
-        if (src_file_data[char_index] == ' ' || src_file_data[char_index] == '\0') {
-            log_i(LOG_NAME_CLIENT, "Sending word_buff: %s", word_buff);
-            sleep(1);
-            sendto(sock_fd, &word_buff, sizeof(word_buff), 0,
-                   (struct sockaddr *) &srv_addr, sizeof(struct sockaddr));
-            word_index = 0;
-            if (src_file_data[char_index] == '\0') break;
-            char_index++;
-            memset(word_buff, 0, sizeof(word_buff));
-            continue;
-        }
-        word_buff[word_index++] = src_file_data[char_index++];
-    }
-
-    free(vargp);
-
-    return 0;
 }
 
 
@@ -164,6 +274,45 @@ void *cli_send_message(void *vargp) {
  * @return nothing
  */
 void *srv_init(void *vargp) {
+
+    int server_port = *(int *) vargp;
+
+    peer_info = malloc(sizeof(peer_info));
+
+    peer_info->port = server_port;
+    getifaddrs(&interfaces);
+    strcpy(peer_info->ip, inet_ntoa(((struct sockaddr_in *) interfaces->ifa_addr)->sin_addr));
+
+    int test_fd;
+    struct ifreq ifr;
+    test_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    ifr.ifr_addr.sa_family = AF_INET;
+    snprintf(ifr.ifr_name, IFNAMSIZ, "en0");
+    ioctl(test_fd, SIOCGIFADDR, &ifr);
+
+    strcpy(peer_info->ip,
+           inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr));
+
+
+    strcpy(peer_info->name, "glebasher");
+    strcpy(peer_info->files, "kek.txt,rickrolled.txt,hellothere.txt");
+
+    strcpy(peer_info->_full_info, "glebasher");
+    strcat(peer_info->_full_info, ":");
+    strcat(peer_info->_full_info, peer_info->ip);
+    strcat(peer_info->_full_info, ":");
+    char buffer[10];
+    memset(&buffer, 0, sizeof(buffer)); // zero out the buffer
+    sprintf(buffer, "%d", server_port);
+    strcat(peer_info->_full_info, buffer);
+
+    strcpy(peer_info->_short_info, peer_info->_full_info);
+    strcat(peer_info->_full_info, ":");
+    strcat(peer_info->_full_info, peer_info->files);
+
+    log_i(LOG_SERVER, "Short info: %s", peer_info->_short_info);
+    log_i(LOG_SERVER, "Full info: %s", peer_info->_full_info);
+
     int master_sock_tcp_fd = 0;
 
     fd_set readfds;
@@ -171,29 +320,29 @@ void *srv_init(void *vargp) {
     struct sockaddr_in server_addr;
 
     if ((master_sock_tcp_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
-        throw(LOG_NAME_SERVER, "Socket creation failed");
+        throw(LOG_SERVER, "Socket creation failed");
 
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(SERVER_PORT);
+    server_addr.sin_port = htons(server_port);
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(master_sock_tcp_fd, (struct sockaddr *) &server_addr,
              sizeof(struct sockaddr)) == -1) {
-        log_i(LOG_NAME_SERVER, "Socket bind failed");
+        log_i(LOG_SERVER, "Socket bind failed");
         pthread_exit(NULL);
     }
 
     struct sockaddr_in sin;
     socklen_t len = sizeof(sin);
     if (getsockname(master_sock_tcp_fd, (struct sockaddr *) &sin, &len) == -1)
-        throw(LOG_NAME_SERVER, "Socket name acquiring failed");
+        throw(LOG_SERVER, "Socket name acquiring failed");
     else
-        log_i(LOG_NAME_SERVER, "Port assigned");
+        log_i(LOG_SERVER, "Port assigned");
 
-    log_i(LOG_NAME_SERVER, "Port number %d", ntohs(sin.sin_port));
+    log_i(LOG_SERVER, "Port number %d", ntohs(sin.sin_port));
 
     if (listen(master_sock_tcp_fd, 5) < 0) {
-        throw(LOG_NAME_SERVER, "Listen failed");
+        throw(LOG_SERVER, "Listen failed");
         pthread_exit(NULL);
     }
 
@@ -204,14 +353,14 @@ void *srv_init(void *vargp) {
         FD_ZERO(&readfds);
         FD_SET(master_sock_tcp_fd, &readfds);
 
-        log_i(LOG_NAME_SERVER, "Waiting for connection");
+        log_i(LOG_SERVER, "Waiting for connection");
 
         select(master_sock_tcp_fd + 1, &readfds, NULL, NULL, NULL);
 
         if (FD_ISSET(master_sock_tcp_fd, &readfds)) {
-            log_i(LOG_NAME_SERVER, "New connection received");
-            //srv_accept_client(master_sock_tcp_fd);
-            pthread_create(&threads[thread_count], NULL, srv_accept_client,
+            log_i(LOG_SERVER, "New connection received");
+            //receive(master_sock_tcp_fd);
+            pthread_create(&threads[thread_count], NULL, receive,
                            (void *) &master_sock_tcp_fd);
             pthread_join(threads[thread_count], NULL);
             thread_count++;
@@ -238,33 +387,70 @@ void command_parse(char *input) {
         return;
     }
 
-    if (!strcmp(arg, "connect")) {
+    if (!strcmp(arg, "file")) {
 
         arg = strtok(NULL, " ");
         if (arg == NULL) {
-            log_i(LOG_NAME_SHELL, "No server address specified");
+            log_i(LOG_SHELL, "No filename specified");
             return;
         }
-        char *address = malloc(sizeof(arg));
-        strcpy(address, arg);
+        char *filename = malloc(sizeof(arg));
+        strcpy(filename, arg);
+
+        log_i(LOG_SHELL, "Arg: %s\n", arg);
+        log_i(LOG_SHELL, "Filename: %s\n", filename);
+
+        char *address;
+        arg = strtok(NULL, " ");
+        if (arg != NULL) {
+            address = malloc(sizeof(arg));
+            strcpy(address, arg);
+        } else address = "127.0.0.1";
 
         unsigned int port = 54777;
         arg = strtok(NULL, " ");
-        if (arg != NULL)
-            port = (unsigned int) atoi(arg);
+        if (arg != NULL) port = (unsigned int) atoi(arg);
 
 
-        s_connect_args *s = malloc(sizeof(s_connect_args));
-        s->address = address;
+
+        s_file_request_args *s = malloc(sizeof(s_file_request_args));
+        s->ip = malloc(sizeof(address));
+        strcpy(s->ip, address);
+        s->port = port;
+        s->filename = malloc(sizeof(filename));
+        strcpy(s->filename, filename);
+
+        log_i(LOG_SHELL, "Filename new: %s\n", s->filename);
+
+        pthread_t c_tid = 0;
+        pthread_create(&c_tid, NULL, request_file, (void *) s);
+        return;
+    }
+
+    if (!strcmp(arg, "sync")) {
+
+        char *address;
+        arg = strtok(NULL, " ");
+        if (arg != NULL) {
+            address = malloc(sizeof(arg));
+            strcpy(address, arg);
+        } else address = "127.0.0.1";
+
+        unsigned int port = 54777;
+        arg = strtok(NULL, " ");
+        if (arg != NULL) port = (unsigned int) atoi(arg);
+
+        s_file_request_args *s = malloc(sizeof(s_file_request_args));
+        s->ip = address;
         s->port = port;
 
         pthread_t c_tid = 0;
-        pthread_create(&c_tid, NULL, cli_send_message,
+        pthread_create(&c_tid, NULL, request_sync,
                        (void *) s);
         return;
     }
 
-    if (!strcmp(arg, "start-server")) {
+    if (!strcmp(arg, "server")) {
 
         int *server_port = malloc(sizeof(int));
         *server_port = 54777;
@@ -273,9 +459,9 @@ void command_parse(char *input) {
         if (arg != NULL) {
             *server_port = atoi(arg);
         }
-        log_i(LOG_NAME_SHELL, "Starting server on port %i", *server_port);
+        log_i(LOG_SHELL, "Starting server on port %i", *server_port);
         pthread_t c_tid = 0;
-        pthread_create(&c_tid, NULL, srv_init, NULL);
+        pthread_create(&c_tid, NULL, srv_init, server_port);
         sleep(1);
         return;
     }
@@ -289,7 +475,7 @@ void init_glebash(char *command) {
     if (command != NULL) command_parse(command);
     print_help();
     while (1) {
-        printf(ANSI_COLOR_YELLOW "glebash-0.3$ " ANSI_COLOR_RESET);
+        printf("\n" ANSI_COLOR_YELLOW "glebash-0.3$ " ANSI_COLOR_RESET);
         char input[64] = "";
         fgets(input, 64, stdin);
         if (!strcmp(input, "exit\n")) return;

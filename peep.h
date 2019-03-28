@@ -10,9 +10,6 @@
 #define ANSI_COLOR_GRAY "\x1b[90m"
 #define ANSI_COLOR_RESET "\x1b[0m"
 
-#define LOG_NAME_SERVER "SERVER"
-#define LOG_NAME_CLIENT "CLIENT"
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <memory.h>

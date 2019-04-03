@@ -22,6 +22,7 @@ void log_i(const char *issuer, const char *message, ...) {
 void print_help() {
     printf("\n" ANSI_COLOR_BLUE "Welcome to GleBash!" "\n" ANSI_COLOR_RESET);
     printf("List of available commands:\n");
+    printf(ANSI_COLOR_CYAN "sync <dest-ip:127.0.0.1> <dest-port:54777>" ANSI_COLOR_RESET " - request a sync" "\n");
     printf(ANSI_COLOR_CYAN "file <filename> <dest-ip:127.0.0.1> <dest-port:54777>" ANSI_COLOR_RESET " - request a file" "\n");
     printf(ANSI_COLOR_CYAN "server <server-port>" ANSI_COLOR_RESET " - start up a server, <server-port> is optional, default is 54777" "\n");
     printf(ANSI_COLOR_CYAN "help" ANSI_COLOR_RESET " - show this help" "\n");
